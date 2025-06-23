@@ -43,10 +43,10 @@ const upload = multer({ storage });
     res.send("EduPath backend is running...");
   });
 
-  app.use((req, res, next) => {
-    console.log(`➡️ [${req.method}] ${req.url}`);
-    next();
-  });
+  // app.use((req, res, next) => {
+  //   console.log(`➡️ [${req.method}] ${req.url}`);
+  //   next();
+  // });
 
   // Get single user by email
   app.get("/users/:email", async (req, res) => {
@@ -63,6 +63,46 @@ const upload = multer({ storage });
     } catch (err) {
       console.error("DB error:", err);
       res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  // GET all categories
+  app.get("/api/categories", async (req, res) => {
+    try {
+      const [rows] = await db.query("SELECT * FROM Category");
+      res.json(rows);
+    } catch (err) {
+      console.error("Error fetching categories:", err);
+      res.status(500).json({ message: "Internal Server Error" });
+    }
+  });
+
+  app.get("/api/courses/:categoryId", async (req, res) => {
+    const { categoryId } = req.params;
+    console.log("API CALL: /api/courses/:categoryId =>", categoryId);
+
+    const query = `
+    SELECT
+      Course.CourseID,
+      Course.Title,
+      Course.ImageURL,
+      Course.Description,
+      Course.Duration,
+      GROUP_CONCAT(Instructor.FullName SEPARATOR ', ') AS Instructors
+    FROM Course
+    LEFT JOIN CourseInstructor ON Course.CourseID = CourseInstructor.CourseID
+    LEFT JOIN Instructor ON CourseInstructor.InstructorID = Instructor.InstructorID
+    WHERE Course.CategoryID = ?
+    GROUP BY Course.CourseID;
+  `;
+
+    try {
+      const [results] = await db.query(query, [categoryId]);
+      console.log("✅ Courses returned:", results.length);
+      res.json(results);
+    } catch (err) {
+      console.error("🔥 MySQL QUERY ERROR:", err.message);
+      res.status(500).send("Database query failed.");
     }
   });
 
