@@ -183,11 +183,11 @@ admin.initializeApp({
       const [stats] = await db.query(`
         SELECT 
           (SELECT COUNT(*) FROM users) as totalUsers,
-          (SELECT COUNT(*) FROM courses) as totalCourses,
+          (SELECT COUNT(*) FROM course) as totalCourses,
           (SELECT COUNT(*) FROM users WHERE role = 'instructor') as totalInstructors,
           (SELECT COALESCE(SUM(total_amount), 0) FROM payments WHERE payment_status = 'completed') as totalRevenue,
           (SELECT COUNT(*) FROM instructor_applications WHERE application_status = 'pending') as pendingInstructors,
-          (SELECT COUNT(*) FROM courses WHERE approval_status = 'pending') as pendingCourses
+          (SELECT COUNT(*) FROM course WHERE approval_status = 'pending') as pendingCourses
       `)
 
       res.json(stats[0])
@@ -224,7 +224,7 @@ admin.initializeApp({
           u.last_name,
           u.email
         FROM instructor_applications ia
-        JOIN users u ON ia.user_id = u.user_id
+        JOIN users u ON ia.user_id = u.CID
         WHERE ia.application_status = 'pending'
         ORDER BY ia.applied_at DESC
       `)
@@ -242,9 +242,9 @@ admin.initializeApp({
       const [courses] = await db.query(`
         SELECT 
           c.*,
-          i.name as instructor_name
-        FROM courses c
-        JOIN instructors i ON c.instructor_id = i.instructor_id
+          i.FullName as instructor_name
+        FROM course c
+        JOIN instructor i ON c.InstructorID = i.InstructorID
         WHERE c.approval_status = 'pending'
         ORDER BY c.submitted_at DESC
       `)
@@ -342,7 +342,7 @@ admin.initializeApp({
         // Create instructor record
         await db.query(
           `
-          INSERT INTO instructors (CID, name, email, bio, is_active)
+          INSERT INTO instructor (CID, name, email, bio, is_active)
           VALUES (?, ?, ?, 'Instructor assigned by admin', TRUE)
         `,
           [userId, `${user[0].first_name} ${user[0].last_name}`, user[0].email],
@@ -414,7 +414,7 @@ admin.initializeApp({
             // Create instructor record
             await db.query(
               `
-            INSERT INTO instructors (user_id, name, email, bio, expertise, is_active, application_id)
+            INSERT INTO instructor (user_id, name, email, bio, expertise, is_active, application_id)
             VALUES (?, ?, ?, ?, ?, TRUE, ?)
           `,
               [app.user_id, `${app.first_name} ${app.last_name}`, app.email, app.bio, app.expertise, applicationId],
@@ -443,6 +443,7 @@ admin.initializeApp({
   app.post("/api/admin/courses/:courseId/:action", authenticateToken, requireAdmin, async (req, res) => {
     const { courseId, action } = req.params
     const { reason } = req.body
+    console.log(courseId)
 
     if (!["approve", "reject"].includes(action)) {
       return res.status(400).json({ error: "Invalid action" })
@@ -453,9 +454,9 @@ admin.initializeApp({
 
       await db.query(
         `
-        UPDATE courses 
+        UPDATE course 
         SET approval_status = ?, approved_by = ?, approved_at = NOW(), rejection_reason = ?, is_published = ?
-        WHERE course_id = ?
+        WHERE CourseID = ?
       `,
         [status, req.user.userId, reason, action === "approve", courseId],
       )
@@ -483,24 +484,24 @@ admin.initializeApp({
   // Get instructor dashboard stats
   app.get("/api/instructor/stats", authenticateToken, requireInstructor, async (req, res) => {
     try {
-      const [instructor] = await db.query("SELECT instructor_id FROM instructors WHERE user_id = ?", [req.user.userId])
+      const [instructor] = await db.query("SELECT InstructorID FROM instructor WHERE user_id = ?", [req.user.userId])
 
       if (instructor.length === 0) {
         return res.status(404).json({ error: "Instructor profile not found" })
       }
 
-      const instructorId = instructor[0].instructor_id
+      const instructorId = instructor[0].InstructorID
 
       const [stats] = await db.query(
         `
         SELECT 
-          (SELECT COUNT(*) FROM courses WHERE instructor_id = ?) as totalCourses,
-          (SELECT COALESCE(SUM(enrolled_count), 0) FROM courses WHERE instructor_id = ?) as totalStudents,
+          (SELECT COUNT(*) FROM course WHERE InstructorID = ?) as totalCourses,
+          (SELECT COALESCE(SUM(enrollment_count), 0) FROM course WHERE InstructorID = ?) as totalStudents,
           (SELECT COALESCE(SUM(p.total_amount), 0) 
            FROM payments p 
-           JOIN courses c ON p.course_id = c.course_id 
-           WHERE c.instructor_id = ? AND p.payment_status = 'completed') as totalRevenue,
-          (SELECT COALESCE(AVG(rating), 0) FROM courses WHERE instructor_id = ?) as avgRating
+           JOIN course c ON p.course_id = c.CourseID 
+           WHERE c.InstructorID = ? AND p.payment_status = 'completed') as totalRevenue,
+          (SELECT COALESCE(AVG(rating), 0) FROM course WHERE InstructorID = ?) as avgRating
       `,
         [instructorId, instructorId, instructorId, instructorId],
       )
@@ -515,23 +516,23 @@ admin.initializeApp({
   // Get instructor courses
   app.get("/api/instructor/courses", authenticateToken, requireInstructor, async (req, res) => {
     try {
-      const [instructor] = await db.query("SELECT instructor_id FROM instructors WHERE user_id = ?", [req.user.userId])
+      const [instructor] = await db.query("SELECT InstructorID FROM instructor WHERE user_id = ?", [req.user.userId])
 
       if (instructor.length === 0) {
         return res.status(404).json({ error: "Instructor profile not found" })
       }
 
-      const instructorId = instructor[0].instructor_id
+      const instructorId = instructor[0].InstructorID
 
       const [courses] = await db.query(
         `
         SELECT 
           c.*,
           COALESCE(SUM(p.total_amount), 0) as revenue
-        FROM courses c
-        LEFT JOIN payments p ON c.course_id = p.course_id AND p.payment_status = 'completed'
-        WHERE c.instructor_id = ?
-        GROUP BY c.course_id
+        FROM course c
+        LEFT JOIN payments p ON c.CourseID = p.course_id AND p.payment_status = 'completed'
+        WHERE c.InstructorID = ?
+        GROUP BY c.CourseID
         ORDER BY c.created_at DESC
       `,
         [instructorId],
@@ -552,38 +553,59 @@ admin.initializeApp({
     upload.single("course_image"),
     async (req, res) => {
       try {
-        const [instructor] = await db.query("SELECT instructor_id FROM instructors WHERE user_id = ?", [
-          req.user.userId,
-        ])
-
+        // Step 1: Get instructor ID
+        const [instructor] = await db.query(
+          "SELECT InstructorID FROM instructor WHERE user_id = ?",
+          [req.user.userId]
+        );
+  
         if (instructor.length === 0) {
-          return res.status(404).json({ error: "Instructor profile not found" })
+          return res.status(404).json({ error: "Instructor profile not found" });
         }
-
-        const instructorId = instructor[0].instructor_id
-        const courseData = req.body
-        const modules = JSON.parse(courseData.modules || "[]")
-        const imageUrl = req.file ? `/uploads/${req.file.filename}` : null
-
-        // Generate slug if not provided
+  
+        const instructorId = instructor[0].InstructorID;
+  
+        // Step 2: Parse form data
+        const courseData = req.body;
+        const modules = JSON.parse(courseData.modules || "[]");
+        const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
+  
+        // Step 3: Generate slug
         const slug =
           courseData.slug ||
           courseData.title
             .toLowerCase()
             .replace(/[^a-z0-9 -]/g, "")
             .replace(/\s+/g, "-")
-            .replace(/-+/g, "-")
-
-        // Create course
+            .replace(/-+/g, "-");
+  
+        // Step 4: Calculate total lessons and duration in minutes
+        let totalDurationMinutes = 0;
+        let totalLessons = 0;
+  
+        for (const module of modules) {
+          for (const lesson of module.lessons) {
+            totalDurationMinutes += parseInt(lesson.duration_minutes || 0);
+            totalLessons += 1;
+          }
+        }
+        console.log(courseData.category_id)
+        console.log(courseData)
+  
+        // Step 5: Build course duration string (optional)
+        const durationStr = `${courseData.duration_weeks || 0} weeks, ${courseData.duration_hours || 0} hours`;
+  
+        // Step 6: Insert course
         const [courseResult] = await db.query(
           `
-        INSERT INTO courses (
-          title, slug, description, short_description, category_id, instructor_id,
-          price, original_price, duration_weeks, duration_hours, difficulty_level,
-          language, image_url, learning_outcomes, prerequisites, target_audience,
-          certificate_available, approval_status, submitted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
+          INSERT INTO course (
+            Title, slug, Description, short_description, CategoryID, InstructorID,
+            price, discount_price, Duration, level, language,
+            ImageURL, learning_outcomes, prerequisites, 
+             approval_status, submitted_at,
+            total_duration_minutes, total_lessons
+          ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
           [
             courseData.title,
             slug,
@@ -592,47 +614,46 @@ admin.initializeApp({
             courseData.category_id,
             instructorId,
             courseData.price,
-            courseData.original_price || courseData.price,
-            courseData.duration_weeks,
-            courseData.duration_hours,
+            courseData.discount_price || null,
+            durationStr,
             courseData.difficulty_level,
             courseData.language,
             imageUrl,
             courseData.learning_outcomes,
             courseData.prerequisites,
-            courseData.target_audience,
-            courseData.certificate_available === "true",
             courseData.approval_status,
             courseData.approval_status === "pending" ? new Date() : null,
-          ],
-        )
-
-        const courseId = courseResult.insertId
-
-        // Create modules and lessons
+            totalDurationMinutes,
+            totalLessons,
+          ]
+        );
+  
+        const courseId = courseResult.insertId;
+  
+        // Step 7: Insert modules and lessons
         for (let moduleIndex = 0; moduleIndex < modules.length; moduleIndex++) {
-          const module = modules[moduleIndex]
-
+          const module = modules[moduleIndex];
+  
           const [moduleResult] = await db.query(
             `
-          INSERT INTO course_modules (course_id, title, description, order_index)
-          VALUES (?, ?, ?, ?)
-        `,
-            [courseId, module.title, module.description, moduleIndex + 1],
-          )
-
-          const moduleId = moduleResult.insertId
-
+            INSERT INTO course_modules (course_id, title, description, order_index)
+            VALUES (?, ?, ?, ?)
+            `,
+            [courseId, module.title, module.description, moduleIndex + 1]
+          );
+  
+          const moduleId = moduleResult.insertId;
+  
           for (let lessonIndex = 0; lessonIndex < module.lessons.length; lessonIndex++) {
-            const lesson = module.lessons[lessonIndex]
-
+            const lesson = module.lessons[lessonIndex];
+  
             await db.query(
               `
-            INSERT INTO course_lessons (
-              module_id, course_id, title, content_type, content_url, content_text,
-              duration_minutes, order_index, is_preview
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `,
+              INSERT INTO course_lessons (
+                module_id, course_id, title, content_type, content_url, content_text,
+                duration_minutes, order_index, is_preview
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `,
               [
                 moduleId,
                 courseId,
@@ -643,19 +664,19 @@ admin.initializeApp({
                 lesson.duration_minutes,
                 lessonIndex + 1,
                 lesson.is_preview,
-              ],
-            )
+              ]
+            );
           }
         }
-
-        res.json({ success: true, courseId, message: "Course created successfully" })
+  
+        res.json({ success: true, courseId, message: "Course created successfully" });
       } catch (error) {
-        console.error("Create course error:", error)
-        res.status(500).json({ error: "Database error" })
+        console.error("Create course error:", error);
+        res.status(500).json({ error: "Database error" });
       }
-    },
+    }
   )
-
+  
   // Submit course for approval
   app.post("/api/instructor/courses/:courseId/submit", authenticateToken, requireInstructor, async (req, res) => {
     const { courseId } = req.params
@@ -663,10 +684,10 @@ admin.initializeApp({
     try {
       await db.query(
         `
-        UPDATE courses 
+        UPDATE course 
         SET approval_status = 'pending', submitted_at = NOW()
-        WHERE course_id = ? AND instructor_id IN (
-          SELECT instructor_id FROM instructors WHERE user_id = ?
+        WHERE CourseID = ? AND InstructorID IN (
+          SELECT InstructorID FROM instructor WHERE user_id = ?
         )
       `,
         [courseId, req.user.userId],
@@ -686,9 +707,9 @@ admin.initializeApp({
     try {
       await db.query(
         `
-        DELETE FROM courses 
-        WHERE course_id = ? AND instructor_id IN (
-          SELECT instructor_id FROM instructors WHERE user_id = ?
+        DELETE FROM course 
+        WHERE CourseID = ? AND InstructorID IN (
+          SELECT InstructorID FROM instructor WHERE user_id = ?
         )
       `,
         [courseId, req.user.userId],
@@ -700,6 +721,97 @@ admin.initializeApp({
       res.status(500).json({ error: "Database error" })
     }
   })
+
+  // Get modules with lessons for a course
+app.get("/api/instructor/courses/:courseId/content", authenticateToken, requireInstructor, async (req, res) => {
+  const { courseId } = req.params
+
+  try {
+    // Get modules
+    const [modules] = await db.query(
+      "SELECT * FROM module WHERE CourseID = ? ORDER BY order_index",
+      [courseId]
+    )
+
+    // Get lessons
+    const [lessons] = await db.query(
+      "SELECT * FROM lesson WHERE ModuleID IN (?) ORDER BY order_index",
+      [modules.map((m) => m.ModuleID)]
+    )
+
+    // Group lessons under modules
+    const structured = modules.map((mod) => ({
+      ...mod,
+      lessons: lessons.filter((l) => l.ModuleID === mod.ModuleID),
+    }))
+
+    res.json(structured)
+  } catch (err) {
+    console.error("Get content error:", err)
+    res.status(500).json({ error: "Database error" })
+  }
+})
+
+app.post("/api/instructor/modules", authenticateToken, requireInstructor, async (req, res) => {
+  const { CourseID, Title, Description } = req.body
+  try {
+    await db.query(
+      "INSERT INTO module (CourseID, Title, Description) VALUES (?, ?, ?)",
+      [CourseID, Title, Description]
+    )
+    res.json({ message: "Module added" })
+  } catch (err) {
+    res.status(500).json({ error: "Database error" })
+  }
+})
+app.post("/api/instructor/lessons", authenticateToken, requireInstructor, async (req, res) => {
+  const {
+    ModuleID, Title, Content, VideoURL, lesson_type, duration_minutes,
+    is_free, live_stream_url, live_stream_date, document_url
+  } = req.body
+
+  try {
+    await db.query(
+      `INSERT INTO lesson (
+        ModuleID, Title, Content, VideoURL, lesson_type, duration_minutes,
+        is_free, live_stream_url, live_stream_date, document_url
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ModuleID, Title, Content, VideoURL, lesson_type,
+        duration_minutes, is_free, live_stream_url, live_stream_date, document_url,
+      ]
+    )
+    res.json({ message: "Lesson added" })
+  } catch (err) {
+    console.error("Add lesson error", err)
+    res.status(500).json({ error: "Database error" })
+  }
+})
+app.post("/api/instructor/live-sessions", authenticateToken, requireInstructor, async (req, res) => {
+  const {
+    course_id, lesson_id, title, description,
+    session_date, duration_minutes, zoom_url, streamyard_url
+  } = req.body
+
+  const instructor_id = req.user.instructorId
+
+  try {
+    await db.query(
+      `INSERT INTO live_sessions (
+        course_id, lesson_id, instructor_id, title, description, session_date,
+        duration_minutes, zoom_url, streamyard_url
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        course_id, lesson_id, instructor_id, title, description,
+        session_date, duration_minutes, zoom_url, streamyard_url,
+      ]
+    )
+    res.json({ message: "Live session scheduled" })
+  } catch (err) {
+    res.status(500).json({ error: "Database error" })
+  }
+})
+
 
   app.get("/", (req, res) => {
     res.json({
@@ -1042,7 +1154,7 @@ WHERE e.CID = ?
       FROM course c
       LEFT JOIN courseinstructor ci ON c.CourseID = ci.CourseID
       LEFT JOIN instructor i ON ci.InstructorID = i.InstructorID
-      WHERE c.CategoryID = ?
+      WHERE c.CategoryID = ? and approval_status="approved"
       GROUP BY c.CourseID
       ORDER BY c.is_featured DESC, c.created_at DESC
     `
@@ -1082,7 +1194,7 @@ WHERE e.CID = ?
         JOIN category cat ON c.CategoryID = cat.CategoryID
         LEFT JOIN courseinstructor ci ON c.CourseID = ci.CourseID
         LEFT JOIN instructor i ON ci.InstructorID = i.InstructorID
-        WHERE c.CourseID = ?
+        WHERE c.CourseID = ? and approval_status="approved"
         GROUP BY c.CourseID
       `,
         [courseId],
@@ -1683,6 +1795,11 @@ WHERE e.CID = ?
     }
   })
 
+
+  
+
+
+
   // ============================================
   // ERROR HANDLING MIDDLEWARE
   // ============================================
@@ -1728,6 +1845,9 @@ WHERE e.CID = ?
       res.status(500).json({ error: err.message })
     }
   })
+
+
+
 
 
 
