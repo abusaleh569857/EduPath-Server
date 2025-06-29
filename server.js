@@ -184,7 +184,7 @@ const requireInstructor = (req, res, next) => {
         const [stats] = await db.query(`
         SELECT 
           (SELECT COUNT(*) FROM users) as totalUsers,
-          (SELECT COUNT(*) FROM courses) as totalCourses,
+          (SELECT COUNT(*) FROM course) as totalCourses,
           (SELECT COUNT(*) FROM users WHERE role = 'instructor') as totalInstructors,
           (SELECT COALESCE(SUM(total_amount), 0) FROM payments WHERE payment_status = 'completed') as totalRevenue,
           (SELECT COUNT(*) FROM instructor_applications WHERE application_status = 'pending') as pendingInstructors,
@@ -235,7 +235,7 @@ const requireInstructor = (req, res, next) => {
           u.last_name,
           u.email
         FROM instructor_applications ia
-        JOIN users u ON ia.user_id = u.user_id
+        JOIN users u ON ia.user_id = u.CID
         WHERE ia.application_status = 'pending'
         ORDER BY ia.applied_at DESC
       `);
@@ -258,9 +258,9 @@ const requireInstructor = (req, res, next) => {
         const [courses] = await db.query(`
         SELECT 
           c.*,
-          i.name as instructor_name
-        FROM courses c
-        JOIN instructors i ON c.instructor_id = i.instructor_id
+          i.FullName as instructor_name
+        FROM course c
+        JOIN instructor i ON c.InstructorID = i.InstructorID
         WHERE c.approval_status = 'pending'
         ORDER BY c.submitted_at DESC
       `);
@@ -469,7 +469,7 @@ const requireInstructor = (req, res, next) => {
             // Create instructor record
             await db.query(
               `
-            INSERT INTO instructors (user_id, name, email, bio, expertise, is_active, application_id)
+            INSERT INTO instructor (user_id, name, email, bio, expertise, is_active, application_id)
             VALUES (?, ?, ?, ?, ?, TRUE, ?)
           `,
               [
@@ -526,7 +526,7 @@ const requireInstructor = (req, res, next) => {
           `
         UPDATE courses 
         SET approval_status = ?, approved_by = ?, approved_at = NOW(), rejection_reason = ?, is_published = ?
-        WHERE course_id = ?
+        WHERE CourseID = ?
       `,
           [status, req.user.userId, reason, action === "approve", courseId]
         );
@@ -580,13 +580,13 @@ const requireInstructor = (req, res, next) => {
         const [stats] = await db.query(
           `
         SELECT 
-          (SELECT COUNT(*) FROM courses WHERE instructor_id = ?) as totalCourses,
-          (SELECT COALESCE(SUM(enrolled_count), 0) FROM courses WHERE instructor_id = ?) as totalStudents,
+          (SELECT COUNT(*) FROM course WHERE InstructorID = ?) as totalCourses,
+          (SELECT COALESCE(SUM(enrollment_count), 0) FROM course WHERE InstructorID = ?) as totalStudents,
           (SELECT COALESCE(SUM(p.total_amount), 0) 
            FROM payments p 
-           JOIN courses c ON p.course_id = c.course_id 
-           WHERE c.instructor_id = ? AND p.payment_status = 'completed') as totalRevenue,
-          (SELECT COALESCE(AVG(rating), 0) FROM courses WHERE instructor_id = ?) as avgRating
+           JOIN course c ON p.course_id = c.CourseID 
+           WHERE c.InstructorID = ? AND p.payment_status = 'completed') as totalRevenue,
+          (SELECT COALESCE(AVG(rating), 0) FROM course WHERE InstructorID = ?) as avgRating
       `,
           [instructorId, instructorId, instructorId, instructorId]
         );
@@ -624,10 +624,10 @@ const requireInstructor = (req, res, next) => {
         SELECT 
           c.*,
           COALESCE(SUM(p.total_amount), 0) as revenue
-        FROM courses c
-        LEFT JOIN payments p ON c.course_id = p.course_id AND p.payment_status = 'completed'
-        WHERE c.instructor_id = ?
-        GROUP BY c.course_id
+        FROM course c
+        LEFT JOIN payments p ON c.CourseID = p.course_id AND p.payment_status = 'completed'
+        WHERE c.InstructorID = ?
+        GROUP BY c.CourseID
         ORDER BY c.created_at DESC
       `,
           [instructorId]
@@ -677,13 +677,14 @@ const requireInstructor = (req, res, next) => {
         // Create course
         const [courseResult] = await db.query(
           `
-        INSERT INTO courses (
-          title, slug, description, short_description, category_id, instructor_id,
-          price, original_price, duration_weeks, duration_hours, difficulty_level,
-          language, image_url, learning_outcomes, prerequisites, target_audience,
-          certificate_available, approval_status, submitted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
+          INSERT INTO course (
+            Title, slug, Description, short_description, CategoryID, InstructorID,
+            price, discount_price, Duration, level, language,
+            ImageURL, learning_outcomes, prerequisites, 
+             approval_status, submitted_at,
+            total_duration_minutes, total_lessons
+          ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
           [
             courseData.title,
             slug,
@@ -692,16 +693,13 @@ const requireInstructor = (req, res, next) => {
             courseData.category_id,
             instructorId,
             courseData.price,
-            courseData.original_price || courseData.price,
-            courseData.duration_weeks,
-            courseData.duration_hours,
+            courseData.discount_price || null,
+            durationStr,
             courseData.difficulty_level,
             courseData.language,
             imageUrl,
             courseData.learning_outcomes,
             courseData.prerequisites,
-            courseData.target_audience,
-            courseData.certificate_available === "true",
             courseData.approval_status,
             courseData.approval_status === "pending" ? new Date() : null,
           ]
@@ -732,11 +730,11 @@ const requireInstructor = (req, res, next) => {
 
             await db.query(
               `
-            INSERT INTO course_lessons (
-              module_id, course_id, title, content_type, content_url, content_text,
-              duration_minutes, order_index, is_preview
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `,
+              INSERT INTO course_lessons (
+                module_id, course_id, title, content_type, content_url, content_text,
+                duration_minutes, order_index, is_preview
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `,
               [
                 moduleId,
                 courseId,
@@ -749,6 +747,8 @@ const requireInstructor = (req, res, next) => {
                 lesson.is_preview,
               ]
             );
+              ]
+            );
           }
         }
 
@@ -758,6 +758,8 @@ const requireInstructor = (req, res, next) => {
           message: "Course created successfully",
         });
       } catch (error) {
+        console.error("Create course error:", error);
+        res.status(500).json({ error: "Database error" });
         console.error("Create course error:", error);
         res.status(500).json({ error: "Database error" });
       }
@@ -777,8 +779,8 @@ const requireInstructor = (req, res, next) => {
           `
         UPDATE courses 
         SET approval_status = 'pending', submitted_at = NOW()
-        WHERE course_id = ? AND instructor_id IN (
-          SELECT instructor_id FROM instructors WHERE user_id = ?
+        WHERE CourseID = ? AND InstructorID IN (
+          SELECT InstructorID FROM instructor WHERE user_id = ?
         )
       `,
           [courseId, req.user.userId]
@@ -1212,7 +1214,7 @@ WHERE e.CID = ?
       FROM course c
       LEFT JOIN courseinstructor ci ON c.CourseID = ci.CourseID
       LEFT JOIN instructor i ON ci.InstructorID = i.InstructorID
-      WHERE c.CategoryID = ?
+      WHERE c.CategoryID = ? and approval_status="approved"
       GROUP BY c.CourseID
       ORDER BY c.is_featured DESC, c.created_at DESC
     `;
@@ -1252,7 +1254,7 @@ WHERE e.CID = ?
         JOIN category cat ON c.CategoryID = cat.CategoryID
         LEFT JOIN courseinstructor ci ON c.CourseID = ci.CourseID
         LEFT JOIN instructor i ON ci.InstructorID = i.InstructorID
-        WHERE c.CourseID = ?
+        WHERE c.CourseID = ? and approval_status="approved"
         GROUP BY c.CourseID
       `,
         [courseId]
