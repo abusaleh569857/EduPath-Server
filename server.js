@@ -674,17 +674,34 @@ const requireInstructor = (req, res, next) => {
             .replace(/\s+/g, "-")
             .replace(/-+/g, "-");
 
+        // Calculate total duration
+        let totalDuration = 0;
+        modules.forEach((module) => {
+          module.lessons.forEach((lesson) => {
+            totalDuration += Number(lesson.duration_minutes || 0);
+          });
+        });
+
+        const totalLessons = modules.reduce(
+          (sum, module) => sum + module.lessons.length,
+          0
+        );
+
+        const durationStr = `${Math.floor(totalDuration / 60)}h ${
+          totalDuration % 60
+        }m`;
+
         // Create course
         const [courseResult] = await db.query(
           `
-          INSERT INTO course (
-            Title, slug, Description, short_description, CategoryID, InstructorID,
-            price, discount_price, Duration, level, language,
-            ImageURL, learning_outcomes, prerequisites, 
-             approval_status, submitted_at,
-            total_duration_minutes, total_lessons
-          ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `,
+        INSERT INTO course (
+          Title, slug, Description, short_description, CategoryID, InstructorID,
+          price, discount_price, Duration, level, language,
+          ImageURL, learning_outcomes, prerequisites, 
+          approval_status, submitted_at,
+          total_duration_minutes, total_lessons
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
           [
             courseData.title,
             slug,
@@ -702,6 +719,8 @@ const requireInstructor = (req, res, next) => {
             courseData.prerequisites,
             courseData.approval_status,
             courseData.approval_status === "pending" ? new Date() : null,
+            totalDuration,
+            totalLessons,
           ]
         );
 
@@ -715,7 +734,7 @@ const requireInstructor = (req, res, next) => {
             `
           INSERT INTO course_modules (course_id, title, description, order_index)
           VALUES (?, ?, ?, ?)
-        `,
+          `,
             [courseId, module.title, module.description, moduleIndex + 1]
           );
 
@@ -730,11 +749,11 @@ const requireInstructor = (req, res, next) => {
 
             await db.query(
               `
-              INSERT INTO course_lessons (
-                module_id, course_id, title, content_type, content_url, content_text,
-                duration_minutes, order_index, is_preview
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-              `,
+            INSERT INTO course_lessons (
+              module_id, course_id, title, content_type, content_url, content_text,
+              duration_minutes, order_index, is_preview
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `,
               [
                 moduleId,
                 courseId,
@@ -747,8 +766,6 @@ const requireInstructor = (req, res, next) => {
                 lesson.is_preview,
               ]
             );
-              ]
-            );
           }
         }
 
@@ -758,8 +775,6 @@ const requireInstructor = (req, res, next) => {
           message: "Course created successfully",
         });
       } catch (error) {
-        console.error("Create course error:", error);
-        res.status(500).json({ error: "Database error" });
         console.error("Create course error:", error);
         res.status(500).json({ error: "Database error" });
       }
@@ -1400,13 +1415,11 @@ WHERE e.CID = ?
           enrollmentId,
         });
       } else {
-        res
-          .status(400)
-          .json({
-            success: false,
-            message: "SSL init failed",
-            error: apiResponse,
-          });
+        res.status(400).json({
+          success: false,
+          message: "SSL init failed",
+          error: apiResponse,
+        });
       }
     } catch (error) {
       console.error("Init error:", error);
